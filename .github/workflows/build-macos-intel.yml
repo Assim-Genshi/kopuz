@@ -1,0 +1,143 @@
+name: Build Intel macOS (x64)
+
+on:
+  push:
+    branches: [main, master]
+    tags:
+      - "v*"
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos-x64:
+    name: Build macOS Intel (x86_64)
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          targets: x86_64-apple-darwin
+
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@e00d2c94cc0067b77737821097a62d91c0301baa # v1.21.1
+
+      - name: Install dioxus-cli
+        run: cargo binstall dioxus-cli@0.7.9 -y --force --disable-strategies compile
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Build Tailwind CSS
+        run: npx @tailwindcss/cli -i ./tailwind.css -o ./crates/kopuz/assets/tailwind.css --content './crates/kopuz/**/*.rs,./crates/components/**/*.rs,./crates/pages/**/*.rs,./crates/hooks/**/*.rs,./crates/player/**/*.rs,./crates/reader/**/*.rs'
+
+      - name: Read version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="$(
+            cargo metadata --no-deps --format-version 1 |
+              jq -r '.packages[] | select(.name == "kopuz") | .version'
+          )"
+
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Bundle macOS Intel application
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "10.15"
+        run: dx bundle --release --platform desktop --package kopuz --package-types macos --out-dir dist --locked --target x86_64-apple-darwin
+
+      - name: Verify application bundle and architecture
+        run: |
+          set -euo pipefail
+
+          if [ ! -d "dist/Kopuz.app" ]; then
+            found_app="$(find dist target -name "Kopuz.app" -type d | head -n 1)"
+            if [ -n "$found_app" ]; then
+              echo "Found app at ${found_app}, placing at dist/Kopuz.app"
+              mkdir -p dist
+              cp -R "${found_app}" dist/Kopuz.app
+            else
+              echo "Error: Kopuz.app was not found in dist or target directories"
+              exit 1
+            fi
+          fi
+
+          binary="dist/Kopuz.app/Contents/MacOS/kopuz"
+          if [ ! -f "$binary" ]; then
+            echo "Error: Application binary not found at $binary"
+            exit 1
+          fi
+
+          echo "Inspecting architecture of $binary:"
+          lipo -info "$binary"
+          file "$binary"
+
+          if ! file "$binary" | grep -q "x86_64"; then
+            echo "Error: $binary is not an x86_64 executable!"
+            exit 1
+          fi
+
+      - name: Set bundle version and apply ad-hoc signature
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" dist/Kopuz.app/Contents/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION}" dist/Kopuz.app/Contents/Info.plist
+          codesign --force --sign - dist/Kopuz.app/Contents/MacOS/kopuz
+          codesign --force --deep --sign - dist/Kopuz.app
+          codesign --verify --deep --strict --verbose=2 dist/Kopuz.app
+
+      - name: Free disk space for DMG
+        run: |
+          cargo clean
+          rm -rf node_modules
+          df -h /
+
+      - name: Create DMG and checksum
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          dmg="dist/Kopuz_${VERSION}_x86_64.dmg"
+          hdiutil create -volname Kopuz -srcfolder dist/Kopuz.app -ov -format UDZO "$dmg"
+          hdiutil verify "$dmg"
+          shasum -a 256 "$dmg" > "${dmg}.sha256"
+
+      - name: Upload Intel macOS packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: kopuz-release-macos-x64-${{ steps.version.outputs.version }}
+          path: |
+            dist/*.dmg
+            dist/*.dmg.sha256
+          if-no-files-found: error
+
+      - name: Upload to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          fail_on_unmatched_files: false
+          files: |
+            dist/*_x86_64.dmg
+            dist/*_x86_64.dmg.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
