@@ -164,6 +164,13 @@ pub fn extract_embedded_cover<'a>(
         })
 }
 
+/// The picture a local file carries for its cover, read straight from its tags.
+pub fn embedded_cover_bytes(track_path: &Path) -> Option<Vec<u8>> {
+    let tagged = Probe::open(track_path).ok()?.read().ok()?;
+    let tag = tagged.primary_tag().or_else(|| tagged.first_tag());
+    extract_embedded_cover(&tagged, tag).map(|picture| picture.data().to_vec())
+}
+
 pub fn extract_metadata(
     tag: Option<&Tag>,
     properties: &FileProperties,
@@ -243,6 +250,7 @@ pub fn extract_metadata(
         album: album_title.unwrap_or_else(|| folder_album_title(track_path)),
         khz: sample_rate,
         bitrate: bitrate_kbps,
+        bit_depth: properties.bit_depth().unwrap_or(0),
         duration: properties.duration().as_secs()
             + u64::from(properties.duration().subsec_nanos() > 0),
         track_number: tag.and_then(|t| t.track()),
@@ -460,6 +468,7 @@ pub fn read_with_symphonia(
 
     let mut tags = Vec::new();
     let mut sample_rate = 0;
+    let mut bit_depth = 0;
     let mut duration = 0;
 
     let mss = MediaSourceStream::new(stream, Default::default());
@@ -490,6 +499,10 @@ pub fn read_with_symphonia(
     {
         if let Some(audio) = track_info.codec_params.as_ref().and_then(|p| p.audio()) {
             sample_rate = audio.sample_rate.unwrap_or(0);
+            bit_depth = audio
+                .bits_per_sample
+                .and_then(|bits| u8::try_from(bits).ok())
+                .unwrap_or(0);
         }
         duration = track_info
             .time_base
@@ -556,6 +569,7 @@ pub fn read_with_symphonia(
         album: album_title.unwrap_or_else(|| folder_album_title(track_path)),
         khz: sample_rate,
         bitrate: bitrate_kbps,
+        bit_depth,
         duration,
         track_number: find_symphonia_tag(
             &tags,

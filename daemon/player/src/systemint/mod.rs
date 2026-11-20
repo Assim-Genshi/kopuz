@@ -13,7 +13,7 @@ mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::{
     RepeatMode, SystemEvent, poll_event, set_identity, update_modes, update_now_playing,
-    update_position, wait_event,
+    update_position, update_volume, wait_event,
 };
 
 #[cfg(target_os = "windows")]
@@ -29,9 +29,9 @@ mod android;
 pub use android::{
     RepeatMode, SystemEvent, await_media_permission, capture_event_loop, get_android_music_dir,
     get_files_dir, has_media_permission, init, login_close, login_cookies, login_is_open,
-    login_open, move_task_to_back, request_permissions, set_background_handler, set_keepalive,
-    set_tokio_waker, stop_session, take_back_pressed, update_modes, update_now_playing,
-    wait_back_pressed, wake_run_loop,
+    login_open, move_task_to_back, pick_folder, request_permissions, set_background_handler,
+    set_keepalive, set_tokio_waker, stop_session, take_back_pressed, update_modes,
+    update_now_playing, wait_back_pressed, wake_run_loop,
 };
 
 #[cfg(not(target_os = "android"))]

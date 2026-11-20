@@ -267,6 +267,28 @@ impl api::PlayerApi for GrpcApi {
         Ok(())
     }
 
+    async fn output_devices(&self) -> Result<Vec<api::OutputDevice>, ApiError> {
+        let list = self
+            .client()
+            .get_output_devices(Request::new(proto::GetOutputDevicesRequest {}))
+            .await
+            .map_err(wire_error)?;
+        Ok(list
+            .get_ref()
+            .devices
+            .iter()
+            .map(convert::output_device_from_proto)
+            .collect())
+    }
+
+    async fn open_listen_link(&self, link: String) -> Result<(), ApiError> {
+        self.client()
+            .open_listen_link(Request::new(proto::OpenListenLinkRequest { link }))
+            .await
+            .map_err(wire_error)?;
+        Ok(())
+    }
+
     async fn video(&self, request: api::VideoRequest) -> Result<api::VideoChunk, ApiError> {
         let chunk = self
             .client()
@@ -880,6 +902,39 @@ impl api::ConfigApi for GrpcApi {
 }
 
 #[async_trait::async_trait]
+impl api::PluginApi for GrpcApi {
+    async fn plugins(&self) -> Result<api::PluginCatalog, ApiError> {
+        let catalog = self
+            .client()
+            .get_plugins(Request::new(proto::GetPluginsRequest {}))
+            .await
+            .map_err(wire_error)?;
+        Ok(convert::plugin_catalog_from_proto(catalog.get_ref()))
+    }
+
+    async fn install_plugin(
+        &self,
+        id: String,
+        network: Vec<String>,
+    ) -> Result<api::PluginInfo, ApiError> {
+        let info = self
+            .client()
+            .install_plugin(Request::new(proto::InstallPluginRequest { id, network }))
+            .await
+            .map_err(wire_error)?;
+        Ok(convert::plugin_info_from_proto(info.get_ref()))
+    }
+
+    async fn uninstall_plugin(&self, id: String) -> Result<(), ApiError> {
+        self.client()
+            .uninstall_plugin(Request::new(proto::PluginId { id }))
+            .await
+            .map_err(wire_error)?;
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
 impl api::PrefsApi for GrpcApi {
     async fn frontend_prefs(&self, frontend: String) -> Result<Vec<api::FrontendPref>, ApiError> {
         let list = self
@@ -1202,6 +1257,29 @@ impl api::PlaylistApi for GrpcApi {
             .await
             .map_err(wire_error)?;
         Ok(id.into_inner().id)
+    }
+
+    async fn import_playlist(
+        &self,
+        name: String,
+        m3u: String,
+        base_dir: Option<String>,
+    ) -> Result<api::PlaylistImport, ApiError> {
+        let import = self
+            .client()
+            .import_playlist(Request::new(proto::ImportPlaylistRequest {
+                name,
+                m3u,
+                base_dir,
+            }))
+            .await
+            .map_err(wire_error)?
+            .into_inner();
+        Ok(api::PlaylistImport {
+            id: import.id,
+            matched: import.matched,
+            missing: import.missing,
+        })
     }
 
     async fn rename_playlist(&self, id: String, name: String) -> Result<(), ApiError> {

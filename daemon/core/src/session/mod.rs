@@ -19,7 +19,7 @@ use server::source::RadioPage;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
-use crate::playback::network_factory;
+use crate::playback::{NetworkStream, network_factory};
 use crate::queue_model::{NextOutcome, QueueModel};
 
 mod load;
@@ -301,7 +301,8 @@ impl SessionHandle {
         materializer: Arc<dyn QueueMaterializer>,
         services: PlaybackServices,
     ) -> Result<Self, PlayerInitError> {
-        let player = Player::try_new()?;
+        let playback = &services.settings.playback;
+        let player = Player::try_new_on(playback.output_device.clone(), playback.exclusive_output)?;
         Ok(Self::spawn_with_player(materializer, player, services))
     }
 
@@ -1876,6 +1877,12 @@ impl Session {
                 SettingKey::Playback(PlaybackKey::SampleRateMode) => self
                     .player
                     .set_sample_rate_mode(settings.playback.sample_rate_mode),
+                SettingKey::Playback(PlaybackKey::OutputDevice) => self
+                    .player
+                    .set_output_device(settings.playback.output_device.clone()),
+                SettingKey::Playback(PlaybackKey::ExclusiveOutput) => self
+                    .player
+                    .set_exclusive_output(settings.playback.exclusive_output),
                 SettingKey::Playback(PlaybackKey::DeviceChangeBehavior) => {
                     self.player
                         .set_device_change_behavior(settings.playback.device_change_behavior);
@@ -1975,8 +1982,13 @@ impl Session {
             return;
         };
         let tx = self.cmd_tx.clone();
+        let reach = self
+            .sources
+            .server
+            .as_ref()
+            .and_then(server::plugins::Reach::of_installed);
         tokio::spawn(async move {
-            if let Some(path) = load::fetch_cover_to_temp(&url, &url).await {
+            if let Some(path) = load::fetch_cover_to_temp(&url, &url, reach.as_ref()).await {
                 let _ = tx.send(SessionCmd::ExternalArtworkFetched(path));
             }
         });

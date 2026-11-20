@@ -109,6 +109,8 @@ pub enum SystemEvent {
     Next,
     Prev,
     Stop,
+    /// Dragging the notification's progress bar: absolute target in seconds.
+    Seek(f64),
     /// Notification shuffle button. The notification has no authority over the
     /// mode — the queue does — so a tap asks for a flip rather than a value.
     ToggleShuffle,
@@ -745,6 +747,12 @@ fn clear_jni_exception(env: &mut JNIEnv) {
     }
 }
 
+/// `seek:<ms>` from `MediaSessionHelper.onSeekTo`, as seconds.
+fn parse_seek(action: &str) -> Option<f64> {
+    let ms: u64 = action.strip_prefix("seek:")?.parse().ok()?;
+    Some(ms as f64 / 1000.0)
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_moe_kopuz_kopuz_MediaReceiver_nativeOnAction(
     mut env: JNIEnv,
@@ -773,11 +781,22 @@ pub extern "system" fn Java_moe_kopuz_kopuz_MediaReceiver_nativeOnAction(
         "shuffle" => dispatch_event(SystemEvent::ToggleShuffle),
         "loop" => dispatch_event(SystemEvent::CycleRepeat),
         "media-granted" => set_media_permission(PERMISSION_GRANTED),
+        "folder-cancelled" => finish_folder_pick(None),
+        "folder-unsupported" => {
+            tracing::warn!("picked folder has no filesystem path (not on device storage)");
+            finish_folder_pick(None);
+        }
         "media-denied" => {
             tracing::warn!("media permission denied — the library scan cannot read shared storage");
             set_media_permission(PERMISSION_DENIED);
         }
-        _ => {}
+        other => {
+            if let Some(path) = other.strip_prefix("folder-picked:") {
+                finish_folder_pick(Some(path.to_owned()));
+            } else if let Some(seconds) = parse_seek(other) {
+                dispatch_event(SystemEvent::Seek(seconds));
+            }
+        }
     }
 }
 
@@ -905,4 +924,48 @@ pub fn move_task_to_back() {
         tracing::warn!(error = %e, "MainActivity.moveToBack failed");
         clear_jni_exception(&mut env);
     }
+}
+
+type FolderReply = tokio::sync::oneshot::Sender<Option<String>>;
+static FOLDER_PICK: Mutex<Option<FolderReply>> = Mutex::new(None);
+
+/// Hand the picker's answer to whoever is waiting in `pick_folder`.
+fn finish_folder_pick(path: Option<String>) {
+    let waiter = FOLDER_PICK.lock().ok().and_then(|mut slot| slot.take());
+    if let Some(waiter) = waiter {
+        let _ = waiter.send(path);
+    }
+}
+
+/// Show the system folder picker (Storage Access Framework) and resolve to the
+/// picked folder's filesystem path, or `None` when the user backs out or picks a
+/// folder from a provider with no path behind it. A second call while one is
+/// open supersedes the first, which resolves to `None`.
+pub async fn pick_folder() -> Option<String> {
+    init();
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    if let Ok(mut slot) = FOLDER_PICK.lock() {
+        *slot = Some(reply);
+    }
+    let launched = (|| {
+        let vm = JVM.get()?;
+        let mut env = vm.attach_current_thread().ok()?;
+        let result = find_app_class(&mut env, "dev/dioxus/main/MainActivity").and_then(|class| {
+            env.call_static_method(&class, "pickFolder", "()Z", &[])?
+                .z()
+        });
+        match result {
+            Ok(launched) => Some(launched),
+            Err(e) => {
+                tracing::warn!(error = %e, "MainActivity.pickFolder failed");
+                clear_jni_exception(&mut env);
+                None
+            }
+        }
+    })()
+    .unwrap_or(false);
+    if !launched {
+        finish_folder_pick(None);
+    }
+    answer.await.ok().flatten()
 }

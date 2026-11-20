@@ -7,13 +7,17 @@ import android.content.res.Configuration
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.PowerManager
+import android.provider.DocumentsContract
 import android.provider.Settings
 import android.graphics.Color
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
+import moe.kopuz.kopuz.Haptics
 import moe.kopuz.kopuz.MediaReceiver
 import moe.kopuz.kopuz.MediaSessionHelper
 import moe.kopuz.kopuz.SystemColors
@@ -26,6 +30,44 @@ class MainActivity : WryActivity() {
     fun setSystemColorsEnabled(enabled: Boolean) {
         systemColorsEnabled = enabled
         enableEdgeToEdge()
+    }
+
+    // Registered as a field so it exists before onCreate, as the result API requires.
+    private val folderPicker =
+        registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            val path = uri?.let { treeUriToPath(it) }
+            when {
+                path != null -> MediaReceiver.nativeOnAction("folder-picked:$path")
+                uri != null -> MediaReceiver.nativeOnAction("folder-unsupported")
+                else -> MediaReceiver.nativeOnAction("folder-cancelled")
+            }
+        }
+
+    /**
+     * The scanner reads files by path, which READ_MEDIA_AUDIO allows for shared
+     * storage, so the picked tree is mapped back to its filesystem path rather than
+     * kept as a content URI. Only the external-storage provider has paths behind its
+     * document ids ("primary:Music", "1A2B-3C4D:Albums", "home:"); a tree from any
+     * other provider (Drive, a cloud app) has none and maps to null.
+     */
+    private fun treeUriToPath(uri: Uri): String? {
+        val docId = try {
+            DocumentsContract.getTreeDocumentId(uri)
+        } catch (_: Exception) {
+            return null
+        }
+        if (docId.startsWith("raw:")) return docId.removePrefix("raw:")
+        if (uri.authority != "com.android.externalstorage.documents") return null
+        val volume = docId.substringBefore(':')
+        val relative = docId.substringAfter(':', "").trim('/')
+        @Suppress("DEPRECATION")
+        val primary = Environment.getExternalStorageDirectory().absolutePath
+        val root = when {
+            volume.equals("primary", ignoreCase = true) -> primary
+            volume.equals("home", ignoreCase = true) -> "$primary/Documents"
+            else -> "/storage/$volume"
+        }
+        return if (relative.isEmpty()) root else "$root/$relative"
     }
 
     // Dioxus owns page history; WebView history is not the in-app back stack.
@@ -44,7 +86,6 @@ class MainActivity : WryActivity() {
         if (!requestNotificationPermission()) {
             requestMediaPermission()
         }
-        requestBatteryOptimizationExemption()
     }
 
     // Draw under the status/navigation bars and make them transparent so the app's
@@ -92,6 +133,7 @@ class MainActivity : WryActivity() {
     override fun onWebViewCreate(webView: android.webkit.WebView) {
         this.webView = webView
         webView.addJavascriptInterface(SystemColors(this), "KopuzSystemColors")
+        webView.addJavascriptInterface(Haptics(this), "KopuzHaptics")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             webView.setRendererPriorityPolicy(
                 android.webkit.WebView.RENDERER_PRIORITY_IMPORTANT,
@@ -108,14 +150,27 @@ class MainActivity : WryActivity() {
     // own threads. Resuming it right back keeps that loop turning in the background.
     override fun onPause() {
         super.onPause()
+        resumed = false
         webView?.onResume()
         webView?.resumeTimers()
         MediaReceiver.nativeOnAction("bg-enter")
     }
 
+    private var resumed = false
+
     override fun onResume() {
         super.onResume()
+        resumed = true
         MediaReceiver.nativeOnAction("bg-exit")
+        askPendingBatteryExemption()
+    }
+
+    /** UI thread only. */
+    private fun askPendingBatteryExemption() {
+        if (!resumed || !batteryExemptionPending || askedBatteryExemption) return
+        batteryExemptionPending = false
+        askedBatteryExemption = true
+        requestBatteryOptimizationExemption()
     }
 
     override fun onDestroy() {
@@ -134,6 +189,48 @@ class MainActivity : WryActivity() {
         fun moveToBack() {
             val act = instance ?: return
             act.runOnUiThread { act.moveTaskToBack(true) }
+        }
+
+        /**
+         * Opens the system folder picker. The answer comes back through
+         * MediaReceiver.nativeOnAction as folder-picked:<path>, folder-unsupported
+         * or folder-cancelled. False when there is no activity to open it from.
+         */
+        @JvmStatic
+        fun pickFolder(): Boolean {
+            val act = instance ?: return false
+            act.runOnUiThread {
+                try {
+                    act.folderPicker.launch(null)
+                } catch (_: Exception) {
+                    // No documents UI on this build (ActivityNotFoundException).
+                    MediaReceiver.nativeOnAction("folder-cancelled")
+                }
+            }
+            return true
+        }
+
+        @Volatile
+        private var askedBatteryExemption = false
+
+        @Volatile
+        private var batteryExemptionPending = false
+
+        /**
+         * Asked when playback first starts rather than on first launch: a cold
+         * start already queues the notification and media prompts, and the
+         * battery request only makes sense to someone who has just pressed play
+         * and wants it to keep going with the screen off.
+         *
+         * Android blocks activity launches from the background, so playback
+         * started from the notification or a headset only marks the request
+         * pending and onResume makes it once the activity is visible.
+         */
+        @JvmStatic
+        fun requestBatteryExemptionOnce() {
+            if (askedBatteryExemption) return
+            batteryExemptionPending = true
+            instance?.let { act -> act.runOnUiThread { act.askPendingBatteryExemption() } }
         }
     }
 

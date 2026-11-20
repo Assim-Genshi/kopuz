@@ -33,6 +33,18 @@ pub(crate) fn TrackMetadata(
         .and_then(|track| track.primary_credit())
         .and_then(|credit| credit.key.clone());
     let actions_track = current_track_snapshot.clone();
+    // The audio quality preference widens the bitrate into the whole picture: format, bit depth, sample rate.
+    let show_quality = hooks::ui_prefs::use_ui_prefs().read().show_quality_column;
+    let stats = {
+        let parts = match (show_quality, current_track_snapshot.as_ref()) {
+            (true, Some(track)) => track.quality(true),
+            _ => (current_song_bitrate() > 0)
+                .then(|| format!("{} kbps", current_song_bitrate()))
+                .into_iter()
+                .collect(),
+        };
+        (!parts.is_empty()).then(|| parts.join(" · "))
+    };
     // The picture is desktop-only: Android's webview reaches the daemon over
     // loopback HTTP, which serves covers and not video ranges.
     let version = if cfg!(target_os = "android") {
@@ -141,7 +153,10 @@ pub(crate) fn TrackMetadata(
                     },
                     title: "{favorite_label}",
                     "aria-label": "{favorite_label}",
-                    onclick: move |_| { toggle_favorite(hooks::favorites::current(&ctrl)) },
+                    onclick: move |_| {
+                        crate::haptics::perform(crate::haptics::Haptic::Confirm);
+                        toggle_favorite(hooks::favorites::current(&ctrl));
+                    },
                     i {
                         class: if is_favorite { "fa-solid fa-heart" } else { "fa-regular fa-heart" },
                         "aria-hidden": "true",
@@ -159,8 +174,8 @@ pub(crate) fn TrackMetadata(
         div {
             class: "flex items-center gap-4 text-xs text-white/60 mb-3 w-full",
             style: "max-width: 640px;",
-            if current_song_bitrate() > 0 {
-                span { style: "font-size: 10px;", "{current_song_bitrate} kbps" }
+            if let Some(stats) = stats {
+                span { style: "font-size: 10px;", "{stats}" }
             }
         }
     }
