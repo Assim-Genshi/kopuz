@@ -2,7 +2,7 @@
 
 Kopuz's playback core is a daemon. Every feature the built-in GUI has goes
 through the gRPC surface described here. The contract is one file:
-`crates/proto/proto/kopuz.proto` (package `kopuz.v1`).
+`shared/proto/proto/kopuz.proto` (package `kopuz.v1`).
 
 By default this is a local IPC channel between the daemon and a frontend on
 the same machine. `--listen` also serves it over plain TCP on the address you
@@ -227,6 +227,11 @@ the daemon's machine), `BrowseSource`, `ValidateSource`,
 Settings: `GetConfig`, `EditConfig`, `PreviewEqualizer` and `PreviewReplayGain`
 (heard, not kept).
 
+Plugins: `GetPlugins` (the installed ones and what the community marketplace
+offers, with the hosts each may reach), `InstallPlugin {id}` (fetch, verify
+and install the marketplace's version; its services are offered at once) and
+`UninstallPlugin {id}` (community plugins only). See [plugins.md](plugins.md).
+
 Artwork: `GetArtwork {target, hq}` streams `ArtworkChunk`, the first
 carrying `content_type`.
 
@@ -324,7 +329,7 @@ message, not JSON in a string: the settings are a closed Rust struct on both
 ends of one binary, so the schema says so and a wrong key or type fails to
 compile rather than at runtime.
 
-Credentials (media-server logins, Last.fm and Libre.fm keys, the MusicBrainz
+Credentials (media-server logins, Libre.fm keys, the MusicBrainz
 token) and machine-local path state (`offline_tracks`) are not settings and
 never cross.
 
