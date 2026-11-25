@@ -23,8 +23,11 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-apple-darwin, wasm32-wasip2
+
+      - name: Install compilation targets
+        run: |
+          rustup target add x86_64-apple-darwin wasm32-wasip2
+          rustup show
 
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
