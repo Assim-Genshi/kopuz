@@ -24,117 +24,131 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-apple-darwin
+          targets: x86_64-apple-darwin, wasm32-wasip2
 
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
         with:
-          targets: x86_64-apple-darwin
+          key: x86_64-apple-darwin
 
-      - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@e00d2c94cc0067b77737821097a62d91c0301baa # v1.21.1
+      - name: Install cargo-packager
+        run: cargo install cargo-packager@0.11.8 --locked
 
-      - name: Install dioxus-cli
-        run: cargo binstall dioxus-cli@0.7.9 -y --force --disable-strategies compile
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install Node dependencies
-        run: npm ci
-
-      - name: Build Tailwind CSS
-        run: npx @tailwindcss/cli -i ./tailwind.css -o ./crates/kopuz/assets/tailwind.css --content './crates/kopuz/**/*.rs,./crates/components/**/*.rs,./crates/pages/**/*.rs,./crates/hooks/**/*.rs,./crates/player/**/*.rs,./crates/reader/**/*.rs'
-
-      - name: Read version
+      - name: Read and verify version
         id: version
         shell: bash
+        run: bash scripts/release-version.sh
+
+      - name: Build the app, daemon and command-line client
+        env:
+          KOPUZ_FLAVOR: ${{ steps.version.outputs.flavor }}
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: cargo build --release --locked --target x86_64-apple-darwin -p kopuz -p kopuz-kopuzd -p kopuz-ctl
+
+      - name: Name the binaries for Kopuz Nightly
+        if: steps.version.outputs.nightly == 'true'
         run: |
-          set -euo pipefail
-
-          version="$(
-            cargo metadata --no-deps --format-version 1 |
-              jq -r '.packages[] | select(.name == "kopuz") | .version'
-          )"
-
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          for binary in kopuz kopuzd kopuzctl; do
+            cp "target/x86_64-apple-darwin/release/${binary}" "target/x86_64-apple-darwin/release/${binary}-nightly"
+          done
 
       - name: Bundle macOS Intel application
+        shell: bash
         env:
-          MACOSX_DEPLOYMENT_TARGET: "10.15"
-        run: dx bundle --release --platform desktop --package kopuz --package-types macos --out-dir dist --locked --target x86_64-apple-darwin
-
-      - name: Verify application bundle and architecture
+          VERSION: ${{ steps.version.outputs.version }}
+          NIGHTLY: ${{ steps.version.outputs.nightly }}
         run: |
           set -euo pipefail
 
-          if [ ! -d "dist/Kopuz.app" ]; then
-            found_app="$(find dist target -name "Kopuz.app" -type d | head -n 1)"
-            if [ -n "$found_app" ]; then
-              echo "Found app at ${found_app}, placing at dist/Kopuz.app"
-              mkdir -p dist
-              cp -R "${found_app}" dist/Kopuz.app
-            else
-              echo "Error: Kopuz.app was not found in dist or target directories"
+          if [[ "$NIGHTLY" == true ]]; then
+            config=packaging/kopuz-nightly/kopuz-nightly.ci.toml
+            sed \
+              -e "s/@VERSION@/${VERSION}/" \
+              -e "s|../../target/release|../../target/x86_64-apple-darwin/release|" \
+              packaging/kopuz-nightly/kopuz-nightly.toml > "$config"
+            cargo packager --config "$config" --release --target x86_64-apple-darwin -f app --out-dir "$PWD/dist"
+          else
+            cargo packager -p kopuz --release --target x86_64-apple-darwin -f app --out-dir "$PWD/dist"
+          fi
+
+      - name: Verify application bundle and architecture
+        shell: bash
+        env:
+          PRODUCT: ${{ steps.version.outputs.product }}
+          SUFFIX: ${{ steps.version.outputs.suffix }}
+        run: |
+          set -euo pipefail
+
+          app="dist/${PRODUCT}.app"
+          if [[ ! -d "$app" ]]; then
+            echo "Error: ${app} was not found in dist/"
+            exit 1
+          fi
+
+          for binary in kopuzd kopuzctl kopuz; do
+            bin_path="${app}/Contents/MacOS/${binary}${SUFFIX}"
+            if [[ ! -x "$bin_path" ]]; then
+              echo "Error: Executable not found at ${bin_path}"
               exit 1
             fi
-          fi
+            echo "Inspecting architecture of ${bin_path}:"
+            lipo -info "$bin_path"
+            file "$bin_path"
+            if ! file "$bin_path" | grep -q "x86_64"; then
+              echo "Error: ${bin_path} is not an x86_64 executable!"
+              exit 1
+            fi
+          done
 
-          binary="dist/Kopuz.app/Contents/MacOS/kopuz"
-          if [ ! -f "$binary" ]; then
-            echo "Error: Application binary not found at $binary"
-            exit 1
-          fi
-
-          echo "Inspecting architecture of $binary:"
-          lipo -info "$binary"
-          file "$binary"
-
-          if ! file "$binary" | grep -q "x86_64"; then
-            echo "Error: $binary is not an x86_64 executable!"
-            exit 1
-          fi
-
-      - name: Set bundle version and apply ad-hoc signature
+      # Inside-out: the helpers first, then the bundle that seals them, never --deep.
+      - name: Apply ad-hoc signature
+        shell: bash
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          PRODUCT: ${{ steps.version.outputs.product }}
+          SUFFIX: ${{ steps.version.outputs.suffix }}
         run: |
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION}" dist/Kopuz.app/Contents/Info.plist
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${VERSION}" dist/Kopuz.app/Contents/Info.plist
-          codesign --force --sign - dist/Kopuz.app/Contents/MacOS/kopuz
-          codesign --force --deep --sign - dist/Kopuz.app
-          codesign --verify --deep --strict --verbose=2 dist/Kopuz.app
+          set -euo pipefail
+
+          app="dist/${PRODUCT}.app"
+          for binary in kopuzd kopuzctl kopuz; do
+            codesign --force --sign - "${app}/Contents/MacOS/${binary}${SUFFIX}"
+          done
+          codesign --verify --deep --strict --verbose=2 "$app"
 
       - name: Free disk space for DMG
         run: |
           cargo clean
-          rm -rf node_modules
           df -h /
 
       - name: Create DMG and checksum
         shell: bash
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          PRODUCT: ${{ steps.version.outputs.product }}
+          ASSET: ${{ steps.version.outputs.asset }}
         run: |
           set -euo pipefail
 
-          dmg="dist/Kopuz_${VERSION}_x86_64.dmg"
-          hdiutil create -volname Kopuz -srcfolder dist/Kopuz.app -ov -format UDZO "$dmg"
+          dmg="dist/${ASSET}_${VERSION}_x86_64.dmg"
+          hdiutil create -volname "$PRODUCT" -srcfolder "dist/${PRODUCT}.app" -ov -format UDZO "$dmg"
           hdiutil verify "$dmg"
           shasum -a 256 "$dmg" > "${dmg}.sha256"
 
       - name: Upload Intel macOS packages
         uses: actions/upload-artifact@v4
         with:
-          name: kopuz-release-macos-x64-${{ steps.version.outputs.version }}
+          name: ${{ steps.version.outputs.nightly == 'true' && 'kopuz-nightly-macos-x64' || format('kopuz-release-macos-x64-{0}', steps.version.outputs.version) }}
           path: |
             dist/*.dmg
             dist/*.dmg.sha256
           if-no-files-found: error
 
       - name: Upload to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
+          prerelease: ${{ steps.version.outputs.prerelease == 'true' }}
+          make_latest: ${{ steps.version.outputs.prerelease != 'true' }}
           fail_on_unmatched_files: false
           files: |
             dist/*_x86_64.dmg
